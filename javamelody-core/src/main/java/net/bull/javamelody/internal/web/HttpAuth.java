@@ -26,13 +26,17 @@ import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
+import jakarta.servlet.ServletContext;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
+import net.bull.javamelody.JavamelodyUserAuthentification;
 import net.bull.javamelody.Parameter;
 import net.bull.javamelody.internal.common.LOG;
 import net.bull.javamelody.internal.common.MessageDigestPasswordEncoder;
 import net.bull.javamelody.internal.model.Base64Coder;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.WebApplicationContextUtils;
 
 /**
  * Authentification http des rapports.
@@ -110,6 +114,20 @@ public class HttpAuth {
 				|| allowedAddrPattern.matcher(httpRequest.getRemoteAddr()).matches();
 	}
 
+	public JavamelodyUserAuthentification getJavamelodyUserAuthentificationBean(HttpServletRequest httpRequest) {
+		ServletContext sc = httpRequest.getServletContext();
+		WebApplicationContext wac = WebApplicationContextUtils.getWebApplicationContext(sc);
+//		LOG.info("Looking for bean of type " + JavamelodyUserAuthentification.class.getName());
+		if (wac != null) {
+			try {
+				return wac.getBean(JavamelodyUserAuthentification.class);
+			} catch (Exception e) {
+				// No bean, no problem, we work go with default behaviour
+			}
+		}
+		return null;
+	}
+
 	/**
 	 * Check if the user is authorized, when using the "authorized-users" parameter
 	 * @param httpRequest HttpServletRequest
@@ -117,41 +135,34 @@ public class HttpAuth {
 	 * @throws IOException e
 	 */
 	private boolean isUserAuthorized(HttpServletRequest httpRequest) throws IOException {
-		if (authorizedUsers == null) {
+		JavamelodyUserAuthentification authBean = getJavamelodyUserAuthentificationBean(httpRequest);
+		if(authBean == null) {
 			return true;
 		}
+		final String userpass = extractUserPass(httpRequest);
+		if(userpass == null) {
+			return false;
+		}
+		final String[] parts = userpass.split(":");
+		boolean authOk = authBean.authenticate(parts[0], parts[1]);
+		return checkLockAgainstBruteForceAttack(authOk);
+	}
+
+	private String extractUserPass(HttpServletRequest httpRequest) {
 		// Get Authorization header
 		final String auth = httpRequest.getHeader("Authorization");
 		if (auth == null) {
-			return false; // no auth
+			return null; // no auth
 		}
 		if (!auth.toUpperCase(Locale.ENGLISH).startsWith("BASIC ")) {
-			return false; // we only do BASIC
+			return null; // we only do BASIC
 		}
 		// Get base64 encoded "user:password", comes after "BASIC "
 		final String userpassBase64 = auth.substring("BASIC ".length());
 		// Decode it
 		final String userpass = Base64Coder.decodeString(userpassBase64);
 
-		boolean authOk = false;
-		for (final String authorizedUser : authorizedUsers) {
-			// Hash password in userpass, if password is hashed in authorizedUser
-			final String userpassEncoded = getUserPasswordEncoded(userpass, authorizedUser);
-			if (userpassEncoded != null) {
-				// case of hashed password like authorized-users=user:{SHA-256}c33d66fe65ffcca1f2260e6982dbf0c614b6ea3ddfdb37d6142fbec0feca5245
-				if (authorizedUser.equals(userpassEncoded)) {
-					authOk = true;
-					break;
-				}
-				continue;
-			}
-			// case of clear test password like authorized-users=user:password
-			if (authorizedUser.equals(userpass)) {
-				authOk = true;
-				break;
-			}
-		}
-		return checkLockAgainstBruteForceAttack(authOk);
+		return userpass;
 	}
 
 	private String getUserPasswordEncoded(String userpassDecoded, String authorizedUser)

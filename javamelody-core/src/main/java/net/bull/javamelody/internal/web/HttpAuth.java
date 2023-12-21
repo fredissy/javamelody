@@ -30,7 +30,7 @@ import jakarta.servlet.ServletContext;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
-import net.bull.javamelody.JavamelodyUserAuthentification;
+import net.bull.javamelody.JavamelodyUserAuthentication;
 import net.bull.javamelody.Parameter;
 import net.bull.javamelody.internal.common.LOG;
 import net.bull.javamelody.internal.common.MessageDigestPasswordEncoder;
@@ -114,18 +114,36 @@ public class HttpAuth {
 				|| allowedAddrPattern.matcher(httpRequest.getRemoteAddr()).matches();
 	}
 
-	public JavamelodyUserAuthentification getJavamelodyUserAuthentificationBean(HttpServletRequest httpRequest) {
+	public JavamelodyUserAuthentication getJavamelodyUserAuthentificationBean(HttpServletRequest httpRequest) {
 		ServletContext sc = httpRequest.getServletContext();
 		WebApplicationContext wac = WebApplicationContextUtils.getWebApplicationContext(sc);
 //		LOG.info("Looking for bean of type " + JavamelodyUserAuthentification.class.getName());
 		if (wac != null) {
 			try {
-				return wac.getBean(JavamelodyUserAuthentification.class);
+				return wac.getBean(JavamelodyUserAuthentication.class);
 			} catch (Exception e) {
-				// No bean, no problem, we work go with default behaviour
+				// No bean, no problem, we go with default behaviour
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Check if the user is authorized, using app managed bean
+	 * @param httpRequest HttpServletRequest
+	 * @return true if the user is authorized
+	 */
+	private boolean isUserAuthorizedExternal(HttpServletRequest httpRequest) {
+		JavamelodyUserAuthentication authBean = getJavamelodyUserAuthentificationBean(httpRequest);
+		if(authBean == null) {
+			return true;
+		}
+		final String userpass = extractUserPass(httpRequest);
+		if(userpass == null) {
+			return false;
+		}
+		final String[] parts = userpass.split(":");
+		return checkLockAgainstBruteForceAttack(authBean.authenticate(parts[0], parts[1]));
 	}
 
 	/**
@@ -135,16 +153,30 @@ public class HttpAuth {
 	 * @throws IOException e
 	 */
 	private boolean isUserAuthorized(HttpServletRequest httpRequest) throws IOException {
-		JavamelodyUserAuthentification authBean = getJavamelodyUserAuthentificationBean(httpRequest);
-		if(authBean == null) {
-			return true;
+		// If there is no list of authorized users set, we check using possible external bean :
+		if (authorizedUsers == null) {
+			return isUserAuthorizedExternal(httpRequest);
 		}
 		final String userpass = extractUserPass(httpRequest);
-		if(userpass == null) {
-			return false;
+
+		boolean authOk = false;
+		for (final String authorizedUser : authorizedUsers) {
+			// Hash password in userpass, if password is hashed in authorizedUser
+			final String userpassEncoded = getUserPasswordEncoded(userpass, authorizedUser);
+			if (userpassEncoded != null) {
+				// case of hashed password like authorized-users=user:{SHA-256}c33d66fe65ffcca1f2260e6982dbf0c614b6ea3ddfdb37d6142fbec0feca5245
+				if (authorizedUser.equals(userpassEncoded)) {
+					authOk = true;
+					break;
+				}
+				continue;
+			}
+			// case of clear test password like authorized-users=user:password
+			if (authorizedUser.equals(userpass)) {
+				authOk = true;
+				break;
+			}
 		}
-		final String[] parts = userpass.split(":");
-		boolean authOk = authBean.authenticate(parts[0], parts[1]);
 		return checkLockAgainstBruteForceAttack(authOk);
 	}
 
